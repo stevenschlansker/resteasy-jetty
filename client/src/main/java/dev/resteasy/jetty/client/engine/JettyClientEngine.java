@@ -131,9 +131,17 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
 
         final Request request = client.newRequest(invocation.getUri());
         if (readTimeout > 0) {
-            request.timeout(readTimeout, TimeUnit.MILLISECONDS);
+            request.timeout(readTimeout, readTimeoutUnit);
         }
         final CompletableFuture<T> future = new RequestFuture<T>(request);
+        if (callback != null) {
+            // The listener gives the callback no outcome after a cancel, so report the cancel here, once.
+            future.whenComplete((result, failure) -> {
+                if (future.isCancelled()) {
+                    callback.failed(clientException(failure, null));
+                }
+            });
+        }
 
         // Determine if this is a multipart request
         final Object entity = invocation.getEntity();
@@ -166,15 +174,7 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
             // A rejection here (executor shut down before the body task is queued) escapes on the
             // calling thread, leaving the future uncompleted; fail it explicitly instead.
             try {
-                asyncExecutor.execute(() -> {
-                    try {
-                        try (OutputStream bodyOut = contentOut.getOutputStream()) {
-                            invocation.writeRequestBody(bodyOut);
-                        }
-                    } catch (Exception e) { // Also catch any exception thrown from close
-                        failFuture(future, callback, clientException(e, null));
-                    }
-                });
+                asyncExecutor.execute(() -> writeBody(invocation, contentOut));
             } catch (RejectedExecutionException e) {
                 failFuture(future, callback, clientException(e, null));
                 return future;
@@ -184,6 +184,19 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
 
         request.send(new JettyResponseListener<>(invocation, buffered, callback, extractor, future, asyncExecutor));
         return future;
+    }
+
+    private static void writeBody(final ClientInvocation invocation, final OutputStreamRequestContent contentOut) {
+        final OutputStream bodyOut = contentOut.getOutputStream();
+        try {
+            invocation.writeRequestBody(bodyOut);
+            bodyOut.close();
+        } catch (Throwable t) {
+            // A close would end the chunked body, and the server would accept the partial body as complete. A failed
+            // body fails only the request side, also before the request is sent. The response listener keeps a
+            // response that arrived whole.
+            contentOut.fail(t);
+        }
     }
 
     private void configureTimeout(final Request request) {
@@ -230,8 +243,7 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
     }
 
     static <T> void failFuture(CompletableFuture<T> future, InvocationCallback<T> callback, RuntimeException x) {
-        future.completeExceptionally(x);
-        if (callback != null) {
+        if (future.completeExceptionally(x) && callback != null) {
             callback.failed(x);
         }
     }
