@@ -1,6 +1,5 @@
 package dev.resteasy.jetty.client.engine;
 
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
@@ -31,10 +30,8 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 
 import org.eclipse.jetty.client.HttpClient;
-import org.eclipse.jetty.client.InputStreamResponseListener;
 import org.eclipse.jetty.client.OutputStreamRequestContent;
 import org.eclipse.jetty.client.Request;
-import org.eclipse.jetty.client.Response;
 import org.eclipse.jetty.http.HttpFields;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.client.jaxrs.engines.AsyncClientHttpEngine;
@@ -185,50 +182,7 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
             request.body(contentOut);
         }
 
-        request.send(new InputStreamResponseListener() {
-            private ClientResponse cr;
-
-            @Override
-            @SuppressWarnings("unchecked")
-            public void onHeaders(Response response) {
-                super.onHeaders(response);
-                InputStream inputStream = getInputStream();
-                cr = new JettyClientResponse(invocation.getClientConfiguration(), inputStream);
-                cr.setProperties(invocation.getMutableProperties());
-                cr.setStatus(response.getStatus());
-                cr.setHeaders(extract(response.getHeaders()));
-                try {
-                    asyncExecutor.submit(() -> {
-                        try {
-                            if (buffered) {
-                                cr.bufferEntity();
-                            }
-                            complete(extractor == null ? (T) cr : extractor.extractResult(cr));
-                        } catch (Exception e) {
-                            onFailure(response, closeSuppressing(inputStream, e));
-                        }
-                    });
-                } catch (RejectedExecutionException e) {
-                    // The executor was shut down (e.g. the client was closed) before the completion
-                    // task could be queued. Jetty considers the exchange successful and would swallow
-                    // this exception, leaving the future forever incomplete; fail it explicitly instead.
-                    onFailure(response, closeSuppressing(inputStream, e));
-                }
-            }
-
-            @Override
-            public void onFailure(Response response, Throwable failure) {
-                super.onFailure(response, failure);
-                failFuture(future, callback, clientException(failure, cr));
-            }
-
-            private void complete(T result) {
-                future.complete(result);
-                if (callback != null) {
-                    callback.completed(result);
-                }
-            }
-        });
+        request.send(new JettyResponseListener<>(invocation, buffered, callback, extractor, future, asyncExecutor));
         return future;
     }
 
@@ -269,13 +223,13 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
         }
     }
 
-    MultivaluedMap<String, String> extract(HttpFields headers) {
+    static MultivaluedMap<String, String> extract(HttpFields headers) {
         final MultivaluedMap<String, String> extracted = new MultivaluedHashMap<>();
         headers.forEach(h -> extracted.add(h.getName(), h.getValue()));
         return extracted;
     }
 
-    private static <T> void failFuture(CompletableFuture<T> future, InvocationCallback<T> callback, RuntimeException x) {
+    static <T> void failFuture(CompletableFuture<T> future, InvocationCallback<T> callback, RuntimeException x) {
         future.completeExceptionally(x);
         if (callback != null) {
             callback.failed(x);
@@ -287,7 +241,7 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
      * {@code primary}, and returns {@code primary} so it can be passed straight to a failure
      * handler without losing the original cause.
      */
-    private static Throwable closeSuppressing(AutoCloseable closeable, Throwable primary) {
+    static Throwable closeSuppressing(AutoCloseable closeable, Throwable primary) {
         if (closeable != null) {
             try {
                 closeable.close();
@@ -298,7 +252,7 @@ public class JettyClientEngine implements AsyncClientHttpEngine {
         return primary;
     }
 
-    private static RuntimeException clientException(Throwable ex, jakarta.ws.rs.core.Response clientResponse) {
+    static RuntimeException clientException(Throwable ex, jakarta.ws.rs.core.Response clientResponse) {
         RuntimeException ret;
         if (ex == null) {
             final NullPointerException e = new NullPointerException();
