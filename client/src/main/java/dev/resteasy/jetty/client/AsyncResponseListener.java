@@ -58,7 +58,8 @@ class AsyncResponseListener<T> extends BodyKeepingResponseListener {
         final InputStream inputStream = getInputStream();
         final ClientResponse cr;
         try {
-            cr = JettyClientHttpEngine.buildClientResponse(invocation, response, inputStream);
+            cr = JettyClientHttpEngine.buildClientResponse(invocation, getOutcomeStatus(), getOutcomeHeaders(),
+                    inputStream);
         } catch (RuntimeException e) {
             JettyClientHttpEngine.failFuture(future, callback,
                     JettyClientHttpEngine.clientException(JettyClientHttpEngine.closeSuppressing(inputStream, e), null));

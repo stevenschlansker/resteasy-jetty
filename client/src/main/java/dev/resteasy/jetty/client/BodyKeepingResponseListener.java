@@ -25,6 +25,7 @@ import org.eclipse.jetty.client.RedirectProtocolHandler;
 import org.eclipse.jetty.client.Response;
 import org.eclipse.jetty.client.Result;
 import org.eclipse.jetty.client.WWWAuthenticationProtocolHandler;
+import org.eclipse.jetty.http.HttpFields;
 import org.eclipse.jetty.http.HttpHeader;
 import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.HttpStatus;
@@ -66,6 +67,8 @@ class BodyKeepingResponseListener extends InputStreamResponseListener {
     private volatile long expectedLength = -1;
     private volatile long contentReceived;
     private volatile boolean bodyBuffered;
+    private volatile int outcomeStatus;
+    private volatile HttpFields outcomeHeaders;
 
     /**
      * @param client         the client that sends the request, for its protocol handlers
@@ -83,6 +86,25 @@ class BodyKeepingResponseListener extends InputStreamResponseListener {
     public Response get(final long timeout, final TimeUnit unit)
             throws InterruptedException, TimeoutException, ExecutionException {
         return outcome.get(timeout, unit);
+    }
+
+    /**
+     * Returns the status of the response that is the outcome of the call, as it was when the response became the
+     * outcome, or {@code 0} if the outcome is a failure. See {@link #getOutcomeHeaders()}.
+     */
+    int getOutcomeStatus() {
+        return outcomeStatus;
+    }
+
+    /**
+     * Returns the headers of the response that is the outcome of the call, as they were when the response became the
+     * outcome, or {@code null} if the outcome is a failure. Jetty can change the headers of the response after that,
+     * for example when a decoded body ends. The header fields of Jetty are not thread safe, and a read of the headers
+     * of a Jetty response also changes the state of its fields. So the call reads this copy, which the listener makes
+     * during an event of Jetty, and not the response.
+     */
+    HttpFields getOutcomeHeaders() {
+        return outcomeHeaders;
     }
 
     /**
@@ -185,6 +207,13 @@ class BodyKeepingResponseListener extends InputStreamResponseListener {
 
     private void decide(final Response response, final Throwable failure) {
         if (decided.compareAndSet(false, true)) {
+            if (response != null) {
+                // Jetty sends the events of a response in sequence with its own changes to the response, so the values
+                // here are complete. The headers of an HttpResponse are already an immutable copy, and asImmutable
+                // makes a copy of the headers of another type of response.
+                outcomeStatus = response.getStatus();
+                outcomeHeaders = response.getHeaders().asImmutable();
+            }
             onOutcome(response, failure);
         }
     }

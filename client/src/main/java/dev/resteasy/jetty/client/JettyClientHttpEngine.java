@@ -42,7 +42,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.client.OutputStreamRequestContent;
 import org.eclipse.jetty.client.Request;
-import org.eclipse.jetty.client.Response;
 import org.eclipse.jetty.http.HttpFields;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.client.jaxrs.engines.AsyncClientHttpEngine;
@@ -132,10 +131,11 @@ public class JettyClientHttpEngine implements AsyncClientHttpEngine {
         request.send(listener);
         writeEntity(clientInvocation, request, contentOut, clientInvocation.asyncInvocationExecutor());
         try {
-            final Response response = listener.get(blockingTimeoutMs(request), TimeUnit.MILLISECONDS);
+            listener.get(blockingTimeoutMs(request), TimeUnit.MILLISECONDS);
             final InputStream inputStream = listener.getInputStream();
             try {
-                return buildClientResponse(clientInvocation, response, inputStream);
+                return buildClientResponse(clientInvocation, listener.getOutcomeStatus(), listener.getOutcomeHeaders(),
+                        inputStream);
             } catch (RuntimeException e) {
                 throw clientException(closeSuppressing(inputStream, e), null);
             }
@@ -416,14 +416,15 @@ public class JettyClientHttpEngine implements AsyncClientHttpEngine {
 
     /**
      * Builds a {@link ClientResponse} backed by {@code inputStream}, populated with {@code invocation}'s
-     * mutable properties and {@code response}'s status and headers.
+     * mutable properties and the {@code status} and {@code headers} of the response, which
+     * {@link BodyKeepingResponseListener} records when the response becomes the outcome.
      */
-    static ClientResponse buildClientResponse(final ClientInvocation invocation, final Response response,
-            final InputStream inputStream) {
+    static ClientResponse buildClientResponse(final ClientInvocation invocation, final int status,
+            final HttpFields headers, final InputStream inputStream) {
         final ClientResponse clientResponse = new JettyClientResponse(invocation.getClientConfiguration(), inputStream);
         clientResponse.setProperties(invocation.getMutableProperties());
-        clientResponse.setStatus(response.getStatus());
-        clientResponse.setHeaders(extract(response.getHeaders()));
+        clientResponse.setStatus(status);
+        clientResponse.setHeaders(extract(headers));
         return clientResponse;
     }
 

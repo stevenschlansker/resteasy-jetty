@@ -7,6 +7,7 @@ package dev.resteasy.jetty.client;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -65,6 +66,10 @@ import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.client.HttpProxy;
 import org.eclipse.jetty.client.HttpResponseException;
 import org.eclipse.jetty.client.ProtocolHandler;
+import org.eclipse.jetty.client.Result;
+import org.eclipse.jetty.client.transport.HttpConversation;
+import org.eclipse.jetty.client.transport.HttpRequest;
+import org.eclipse.jetty.client.transport.HttpResponse;
 import org.eclipse.jetty.http.HttpField;
 import org.eclipse.jetty.http.HttpFields;
 import org.eclipse.jetty.http.HttpHeader;
@@ -1591,6 +1596,59 @@ public class JettyClientEngineTest {
             assertEquals(status, response.getStatus());
             assertThrows(ProcessingException.class, () -> response.readEntity(String.class));
         });
+    }
+
+    /**
+     * Jetty can change the headers of a response after the response became the outcome of the call: when a decoded
+     * body ends, it removes {@code Transfer-Encoding} and sets {@code Content-Length}. With a request body, the listener
+     * reads ahead, so Jetty does that on its own thread while the caller reads the headers. The header fields of Jetty
+     * are not thread safe, and the synchronous path then failed with a {@link NullPointerException}. The call must give
+     * the status and the headers that the response had when it became the outcome.
+     * <p>
+     * The request calls the Jetty events in a fixed order on the thread that sends it. After the headers event, it
+     * changes the headers as Jetty does when a decoded body ends, and the status as Jetty does when another response
+     * starts on the exchange. Only the synchronous case failed before the fix. The asynchronous case shows that both
+     * call paths give the same response.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = { false, true })
+    public void headersOfCallIgnoreLaterHeaderChange(final boolean async) throws Exception {
+        final ExecutorService executor = Executors.newCachedThreadPool();
+        client = clientWithExecutor(executor, new HttpClient() {
+            @Override
+            public org.eclipse.jetty.client.Request newRequest(final URI uri) {
+                return new HttpRequest(this, new HttpConversation(), uri) {
+                    @Override
+                    public void send(final org.eclipse.jetty.client.Response.CompleteListener listener) {
+                        final BodyKeepingResponseListener events = (BodyKeepingResponseListener) listener;
+                        final HttpResponse response = new HttpResponse(this).status(200)
+                                .headers(headers -> headers.put(HttpHeader.CONTENT_TYPE, MediaType.TEXT_PLAIN)
+                                        .put(HttpHeader.TRANSFER_ENCODING, HttpHeaderValue.CHUNKED.asString()));
+                        events.onBegin(response);
+                        events.onHeaders(response);
+                        response.status(500).headers(headers -> headers.remove(HttpHeader.TRANSFER_ENCODING)
+                                .put(HttpHeader.CONTENT_LENGTH, 5));
+                        final org.eclipse.jetty.io.Content.Chunk body = org.eclipse.jetty.io.Content.Chunk
+                                .from(ByteBuffer.wrap("nope!".getBytes(StandardCharsets.UTF_8)), true);
+                        events.onContent(response, body, () -> {
+                        });
+                        events.onSuccess(response);
+                        events.onComplete(new Result(this, response));
+                    }
+                };
+            }
+        });
+        try {
+            final Invocation.Builder request = client.target("http://localhost/").request();
+            final Response response = async ? request.async().get().get(10, TimeUnit.SECONDS) : request.get();
+            assertEquals(HttpHeaderValue.CHUNKED.asString(),
+                    response.getHeaderString(HttpHeader.TRANSFER_ENCODING.asString()));
+            assertNull(response.getHeaderString(HttpHeaders.CONTENT_LENGTH));
+            assertEquals(200, response.getStatus());
+            assertEquals("nope!", response.readEntity(String.class));
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     /**
